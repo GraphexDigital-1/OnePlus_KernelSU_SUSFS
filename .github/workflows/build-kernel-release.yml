@@ -157,7 +157,7 @@ jobs:
               jq_filter="map(select(.os_version == \"A15\"))"
               ;;
             A14)
-              jq_filter="map(select(.os_version == \"A14\"))"
+              jq_filter="map(select(.os_version == \"A14\" and .model == \"OP10pro\"))"
               ;;
             android*-*.*)
               # Extract android version and kernel version
