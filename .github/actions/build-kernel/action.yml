@@ -1443,6 +1443,8 @@ runs:
           echo "Optimised memcmp patch not found!"
         fi
         patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/minimise_wakeup_time.patch"
+        patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/reduce_pci_pme_wakeups.patch"
+        patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/avoid_extra_s2idle_wake_attempts.patch"
         patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/int_sqrt.patch"
         if [ "$OP_BBR" = "false" ] && [ "$OP_BBR3" = "false" ]; then
           patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/force_tcp_nodelay.patch"
