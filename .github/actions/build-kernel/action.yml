@@ -1486,6 +1486,19 @@ runs:
         echo "✅ Optimisation Patches applied"
         echo "::endgroup::"
 
+    - name: Apply Local Patches
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Apply local patches (patches/*.patch)"
+        cd "$COMMON_KERNEL_FOLDER"
+        shopt -s nullglob
+        for p in "$GITHUB_WORKSPACE"/patches/*.patch; do
+          echo "Patching $(basename "$p")"
+          patch -p1 --forward < "$p"
+        done
+        echo "::endgroup::"
+
     - name: Apply NTSync Patch
       shell: bash
       if: ${{ env.OP_NTSYNC == 'true' }}
@@ -2016,6 +2029,10 @@ runs:
         fi
 
         
+        # Local config overrides: one CONFIG_X=y / # CONFIG_X is not set per line; last value wins
+        if [ -f "$GITHUB_WORKSPACE/patches/defconfig.fragment" ]; then
+          cat "$GITHUB_WORKSPACE/patches/defconfig.fragment" >> "$OUT/.config"
+        fi
         make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" olddefconfig
         
         KCFLAGS="$KCFLAGS -Wno-error -pipe ${KCFLAGS_EXTRA}"
