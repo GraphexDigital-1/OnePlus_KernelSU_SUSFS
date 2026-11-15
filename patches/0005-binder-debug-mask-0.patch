@@ -1,0 +1,29 @@
+From e067f9a5340d95c4f3e55e38f8128ae9236c07db Mon Sep 17 00:00:00 2001
+From: crash-overlord <crash@overlord.local>
+Date: Sun, 15 Nov 2026 16:42:34 +0000
+Subject: [PATCH 3/7] binder: set binder_debug_mask=0 to suppress logging
+
+Port of Kirisakura 1b3e8c044368 (John Dias) to 5.10: the default debug
+mask (USER_ERROR | FAILED_TRANSACTION | DEAD_TRANSACTION) spams the
+kernel log on some workloads. Default mask to 0; it can still be set
+at runtime via the debug_mask module parameter.
+
+Signed-off-by: John Dias <joaodias@google.com>
+---
+ drivers/android/binder.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/drivers/android/binder.c b/drivers/android/binder.c
+index b31638bb6b3b..486b9024c6c4 100755
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -113,8 +113,7 @@ enum {
+ 	BINDER_DEBUG_PRIORITY_CAP           = 1U << 13,
+ 	BINDER_DEBUG_SPINLOCKS              = 1U << 14,
+ };
+-static uint32_t binder_debug_mask = BINDER_DEBUG_USER_ERROR |
+-	BINDER_DEBUG_FAILED_TRANSACTION | BINDER_DEBUG_DEAD_TRANSACTION;
++static uint32_t binder_debug_mask = 0;
+ module_param_named(debug_mask, binder_debug_mask, uint, 0644);
+ 
+ char *binder_devices_param = CONFIG_ANDROID_BINDER_DEVICES;

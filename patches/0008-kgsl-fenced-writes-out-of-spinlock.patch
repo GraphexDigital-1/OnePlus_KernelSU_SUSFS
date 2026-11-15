@@ -1,0 +1,137 @@
+From ffecaf8faca96823e90c1183882a62ed67f3681f Mon Sep 17 00:00:00 2001
+From: crash-overlord <crash@overlord.local>
+Date: Sun, 15 Nov 2026 16:47:57 +0000
+Subject: [PATCH 6/7] msm: kgsl: Avoid busy waiting for fenced GMU writes
+
+Port of Kirisakura b865c34e1894 (Sultan Alsawaf) to 5.10 / gen7 (a730):
+
+ - Use usleep_range() instead of udelay() when not in atomic context
+   while retrying a fenced register write (gen7/a6xx fenced write).
+ - Move the fenced WPTR write in the preemption path (gen7/a6xx
+   _update_wptr) outside spin_lock_irqsave(&rb->preempt_lock) so that
+   the fenced write is allowed to sleep while the GPU wakes up.
+
+Signed-off-by: Sultan Alsawaf <sultan@kerneltoast.com>
+---
+ drivers/gpu/msm/adreno_a6xx.c         |  6 +++++-
+ drivers/gpu/msm/adreno_a6xx_preempt.c | 16 ++++++++++++----
+ drivers/gpu/msm/adreno_gen7.c         |  6 +++++-
+ drivers/gpu/msm/adreno_gen7_preempt.c | 16 ++++++++++++----
+ 4 files changed, 34 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/msm/adreno_a6xx.c b/drivers/gpu/msm/adreno_a6xx.c
+index d61c1987a3fc..8139d94a99f8 100644
+--- a/drivers/gpu/msm/adreno_a6xx.c
++++ b/drivers/gpu/msm/adreno_a6xx.c
+@@ -160,7 +160,11 @@ int a6xx_fenced_write(struct adreno_device *adreno_dev, u32 offset,
+ 			break;
+ 
+ 		/* Wait a small amount of time before trying again */
+-		udelay(GMU_CORE_WAKEUP_DELAY_US);
++		if (in_atomic())
++			udelay(GMU_CORE_WAKEUP_DELAY_US);
++		else
++			usleep_range(GMU_CORE_WAKEUP_DELAY_US,
++				     3 * GMU_CORE_WAKEUP_DELAY_US);
+ 
+ 		/* Try to write the fenced register again */
+ 		kgsl_regwrite(device, offset, value);
+diff --git a/drivers/gpu/msm/adreno_a6xx_preempt.c b/drivers/gpu/msm/adreno_a6xx_preempt.c
+index 515504792e3c..90a1755a7138 100644
+--- a/drivers/gpu/msm/adreno_a6xx_preempt.c
++++ b/drivers/gpu/msm/adreno_a6xx_preempt.c
+@@ -21,6 +21,8 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer,
+ 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
+ 	struct adreno_ringbuffer *rb = adreno_dev->cur_rb;
+ 	unsigned long flags;
++	bool write = false;
++	unsigned int val;
+ 	int ret = 0;
+ 
+ 	spin_lock_irqsave(&rb->preempt_lock, flags);
+@@ -31,10 +33,8 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer,
+ 		 * dispatcher context. Do it now.
+ 		 */
+ 		if (rb->skip_inline_wptr) {
+-
+-			ret = a6xx_fenced_write(adreno_dev,
+-				A6XX_CP_RB_WPTR, rb->wptr,
+-				FENCE_STATUS_WRITEDROPPED0_MASK);
++			write = true;
++			val = rb->wptr;
+ 
+ 			reset_timer = true;
+ 			rb->skip_inline_wptr = false;
+@@ -55,6 +55,14 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer,
+ 
+ 	spin_unlock_irqrestore(&rb->preempt_lock, flags);
+ 
++	/*
++	 * The fenced write can sleep while the GPU wakes up (usleep_range
++	 * in a6xx_fenced_write()), so do it outside the spinlock.
++	 */
++	if (write)
++		ret = a6xx_fenced_write(adreno_dev, A6XX_CP_RB_WPTR, val,
++					FENCE_STATUS_WRITEDROPPED0_MASK);
++
+ 	if (!atomic) {
+ 		/* If WPTR update fails, set the fault and trigger recovery */
+ 		if (ret) {
+diff --git a/drivers/gpu/msm/adreno_gen7.c b/drivers/gpu/msm/adreno_gen7.c
+index 10f255b03ce0..1ba4d6f40597 100755
+--- a/drivers/gpu/msm/adreno_gen7.c
++++ b/drivers/gpu/msm/adreno_gen7.c
+@@ -173,7 +173,11 @@ int gen7_fenced_write(struct adreno_device *adreno_dev, u32 offset,
+ 			break;
+ 
+ 		/* Wait a small amount of time before trying again */
+-		udelay(GMU_CORE_WAKEUP_DELAY_US);
++		if (in_atomic())
++			udelay(GMU_CORE_WAKEUP_DELAY_US);
++		else
++			usleep_range(GMU_CORE_WAKEUP_DELAY_US,
++				     3 * GMU_CORE_WAKEUP_DELAY_US);
+ 
+ 		/* Try to write the fenced register again */
+ 		kgsl_regwrite(device, offset, value);
+diff --git a/drivers/gpu/msm/adreno_gen7_preempt.c b/drivers/gpu/msm/adreno_gen7_preempt.c
+index 840ce1a87383..3e721f3cc769 100644
+--- a/drivers/gpu/msm/adreno_gen7_preempt.c
++++ b/drivers/gpu/msm/adreno_gen7_preempt.c
+@@ -21,6 +21,8 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer,
+ 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
+ 	struct adreno_ringbuffer *rb = adreno_dev->cur_rb;
+ 	unsigned long flags;
++	bool write = false;
++	unsigned int val;
+ 	int ret = 0;
+ 
+ 	spin_lock_irqsave(&rb->preempt_lock, flags);
+@@ -31,10 +33,8 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer,
+ 		 * dispatcher context. Do it now.
+ 		 */
+ 		if (rb->skip_inline_wptr) {
+-
+-			ret = gen7_fenced_write(adreno_dev,
+-				GEN7_CP_RB_WPTR, rb->wptr,
+-				FENCE_STATUS_WRITEDROPPED0_MASK);
++			write = true;
++			val = rb->wptr;
+ 
+ 			reset_timer = true;
+ 			rb->skip_inline_wptr = false;
+@@ -55,6 +55,14 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer,
+ 
+ 	spin_unlock_irqrestore(&rb->preempt_lock, flags);
+ 
++	/*
++	 * The fenced write can sleep while the GPU wakes up (usleep_range
++	 * in gen7_fenced_write()), so do it outside the spinlock.
++	 */
++	if (write)
++		ret = gen7_fenced_write(adreno_dev, GEN7_CP_RB_WPTR, val,
++					FENCE_STATUS_WRITEDROPPED0_MASK);
++
+ 	if (!atomic) {
+ 		/* If WPTR update fails, set the fault and trigger recovery */
+ 		if (ret) {

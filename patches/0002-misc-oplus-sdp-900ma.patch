@@ -108,8 +108,8 @@ Boot with "oplus_sdp_900ma=0" to leave the device tree untouched.
 
 --- a/drivers/misc/Kconfig
 +++ b/drivers/misc/Kconfig
-@@ -492,4 +492,55 @@
- 
+@@ -575,3 +575,55 @@
++
 +config OPLUS_SDP_900MA
 +	bool "Allow 900 mA input current on USB data ports (OPLUS sm8550)"
 +	depends on OF

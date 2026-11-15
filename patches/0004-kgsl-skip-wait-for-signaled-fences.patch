@@ -1,0 +1,32 @@
+From 10265b78900d28fa71e87bb0289b09bb844a2079 Mon Sep 17 00:00:00 2001
+From: crash-overlord <crash@overlord.local>
+Date: Sun, 15 Nov 2026 16:42:30 +0000
+Subject: [PATCH 2/7] msm: kgsl: Don't try to wait for fences that have been
+ signaled
+
+Port of Kirisakura b693fc0ed5a0 (Sultan Alsawaf) to 5.10: trying to wait
+for fences that have already been signaled incurs a high setup cost,
+since dynamic memory allocation must be used. Avoiding this overhead
+when it isn't needed improves performance.
+
+Signed-off-by: Sultan Alsawaf <sultan@kerneltoast.com>
+---
+ drivers/gpu/msm/kgsl_sync.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/gpu/msm/kgsl_sync.c b/drivers/gpu/msm/kgsl_sync.c
+index c821cb683f80..670f7b29cf6b 100644
+--- a/drivers/gpu/msm/kgsl_sync.c
++++ b/drivers/gpu/msm/kgsl_sync.c
+@@ -486,6 +486,11 @@ struct kgsl_sync_fence_cb *kgsl_sync_fence_async_wait(int fd,
+ 	if (fence == NULL)
+ 		return ERR_PTR(-EINVAL);
+ 
++	if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags)) {
++		dma_fence_put(fence);
++		return NULL;
++	}
++
+ 	/* create the callback */
+ 	kcb = kzalloc(sizeof(*kcb), GFP_KERNEL);
+ 	if (kcb == NULL) {

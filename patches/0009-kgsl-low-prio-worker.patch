@@ -1,0 +1,329 @@
+From 7854d63525cf789ed52ad9e77cdd0adb1dcfc0bd Mon Sep 17 00:00:00 2001
+From: crash-overlord <crash@overlord.local>
+Date: Sun, 15 Nov 2026 16:51:12 +0000
+Subject: [PATCH 7/7] msm: kgsl: add low_prio_worker thread
+
+Port of Kirisakura 4fa036097af8 (Sultan Alsawaf) to the 5.10 / kthread
+worker based events code.
+
+Expensive, non-latency-critical event callbacks (GPU memory frees on
+timestamp) currently run on the RT worker (SCHED_FIFO), which can preempt
+more important work. Add a second, normal priority kthread worker and
+dispatch low priority events (kgsl_add_low_prio_event) on it.
+
+The event priority is also reported in the fire/register tracepoints, in
+the events debugfs dump and exposed via prio_to_string(). Unlike the
+Kirisakura 4.14 version (which left the worker unwired), the event
+dispatch here actually selects the worker based on the event priority.
+
+Signed-off-by: Sultan Alsawaf <sultan@kerneltoast.com>
+---
+ drivers/gpu/msm/kgsl.c        | 17 +++++++-
+ drivers/gpu/msm/kgsl.h        | 12 ++++++
+ drivers/gpu/msm/kgsl_device.h |  3 ++
+ drivers/gpu/msm/kgsl_events.c | 75 ++++++++++++++++++++++++++++++-----
+ drivers/gpu/msm/kgsl_trace.h  | 24 +++++++----
+ 5 files changed, 113 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/gpu/msm/kgsl.c b/drivers/gpu/msm/kgsl.c
+index 4e22e1155187..e6ac386fd710 100755
+--- a/drivers/gpu/msm/kgsl.c
++++ b/drivers/gpu/msm/kgsl.c
+@@ -2547,7 +2547,7 @@ static long gpumem_free_entry_on_timestamp(struct kgsl_device *device,
+ 	kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_RETIRED, &temp);
+ 	trace_kgsl_mem_timestamp_queue(device, entry, context->id, temp,
+ 		timestamp);
+-	ret = kgsl_add_event(device, &context->events,
++	ret = kgsl_add_low_prio_event(device, &context->events,
+ 		timestamp, gpumem_free_func, entry);
+ 
+ 	if (ret)
+@@ -5284,6 +5284,21 @@ int __init kgsl_core_init(void)
+ 
+ 	sched_setscheduler_nocheck(kgsl_driver.RT_worker_thread, SCHED_FIFO, &param);
+ 
++	/*
++	 * This worker is intentionally left at normal priority: it runs
++	 * expensive, non-latency-critical event callbacks (e.g. GPU memory
++	 * frees) that should not preempt RT work.
++	 */
++	kthread_init_worker(&kgsl_driver.low_prio_worker);
++
++	kgsl_driver.low_prio_worker_thread = kthread_run(kthread_worker_fn,
++		&kgsl_driver.low_prio_worker, "kgsl_low_prio_worker_thread");
++
++	if (IS_ERR(kgsl_driver.low_prio_worker_thread)) {
++		pr_err("unable to start kgsl_low_prio_worker_thread\n");
++		goto err;
++	}
++
+ 	kgsl_events_init();
+ 
+ 	result = kgsl_drawobjs_cache_init();
+diff --git a/drivers/gpu/msm/kgsl.h b/drivers/gpu/msm/kgsl.h
+index 95c291def067..f831bc80711d 100755
+--- a/drivers/gpu/msm/kgsl.h
++++ b/drivers/gpu/msm/kgsl.h
+@@ -169,6 +169,8 @@ struct kgsl_driver {
+ 
+ 	struct kthread_worker RT_worker;
+ 	struct task_struct *RT_worker_thread;
++	struct kthread_worker low_prio_worker;
++	struct task_struct *low_prio_worker_thread;
+ };
+ 
+ extern struct kgsl_driver kgsl_driver;
+@@ -328,6 +330,14 @@ struct kgsl_event_group;
+ typedef void (*kgsl_event_func)(struct kgsl_device *, struct kgsl_event_group *,
+ 		void *, int);
+ 
++enum kgsl_priority {
++	KGSL_EVENT_REGULAR_PRIORITY = 0,
++	KGSL_EVENT_LOW_PRIORITY,
++	KGSL_EVENT_NUM_PRIORITIES
++};
++
++const char *prio_to_string(enum kgsl_priority prio);
++
+ /**
+  * struct kgsl_event - KGSL GPU timestamp event
+  * @device: Pointer to the KGSL device that owns the event
+@@ -339,6 +349,7 @@ typedef void (*kgsl_event_func)(struct kgsl_device *, struct kgsl_event_group *,
+  * @created: Jiffies when the event was created
+  * @work: Work struct for dispatching the callback
+  * @result: KGSL event result type to pass to the callback
++ * @prio: Worker priority to dispatch the callback on
+  * group: The event group this event belongs to
+  */
+ struct kgsl_event {
+@@ -351,6 +362,7 @@ struct kgsl_event {
+ 	unsigned int created;
+ 	struct kthread_work work;
+ 	int result;
++	enum kgsl_priority prio;
+ 	struct kgsl_event_group *group;
+ };
+ 
+diff --git a/drivers/gpu/msm/kgsl_device.h b/drivers/gpu/msm/kgsl_device.h
+index b23f0af0a3f6..afb0eac53e2a 100755
+--- a/drivers/gpu/msm/kgsl_device.h
++++ b/drivers/gpu/msm/kgsl_device.h
+@@ -742,6 +742,9 @@ bool kgsl_event_pending(struct kgsl_device *device,
+ 		kgsl_event_func func, void *priv);
+ int kgsl_add_event(struct kgsl_device *device, struct kgsl_event_group *group,
+ 		unsigned int timestamp, kgsl_event_func func, void *priv);
++int kgsl_add_low_prio_event(struct kgsl_device *device,
++		struct kgsl_event_group *group, unsigned int timestamp,
++		kgsl_event_func func, void *priv);
+ void kgsl_process_event_group(struct kgsl_device *device,
+ 	struct kgsl_event_group *group);
+ void kgsl_flush_event_group(struct kgsl_device *device,
+diff --git a/drivers/gpu/msm/kgsl_events.c b/drivers/gpu/msm/kgsl_events.c
+index 2c39b048255f..9667fec4d575 100644
+--- a/drivers/gpu/msm/kgsl_events.c
++++ b/drivers/gpu/msm/kgsl_events.c
+@@ -22,7 +22,22 @@ static inline void signal_event(struct kgsl_device *device,
+ {
+ 	list_del(&event->node);
+ 	event->result = result;
+-	kthread_queue_work(&kgsl_driver.RT_worker, &event->work);
++	kthread_queue_work((event->prio == KGSL_EVENT_LOW_PRIORITY) ?
++		&kgsl_driver.low_prio_worker : &kgsl_driver.RT_worker,
++		&event->work);
++}
++
++static const char *priorities[KGSL_EVENT_NUM_PRIORITIES] = {
++	"KGSL_EVENT_REGULAR_PRIORITY",
++	"KGSL_EVENT_LOW_PRIORITY"
++};
++
++const char *prio_to_string(enum kgsl_priority prio)
++{
++	if (prio < KGSL_EVENT_NUM_PRIORITIES)
++		return priorities[prio];
++	else
++		return "<invalid priority>";
+ }
+ 
+ /**
+@@ -38,7 +53,7 @@ static void _kgsl_event_worker(struct kthread_work *work)
+ 	int id = KGSL_CONTEXT_ID(event->context);
+ 
+ 	trace_kgsl_fire_event(id, event->timestamp, event->result,
+-		jiffies - event->created, event->func);
++		jiffies - event->created, event->func, event->prio);
+ 
+ 	log_kgsl_fire_event(id, event->timestamp, event->result,
+ 		jiffies - event->created);
+@@ -223,15 +238,17 @@ bool kgsl_event_pending(struct kgsl_device *device,
+ 	return result;
+ }
+ /**
+- * kgsl_add_event() - Add a new GPU event to a group
++ * kgsl_add_event_common() - Add a new GPU event to a group
+  * @device: Pointer to a KGSL device
+  * @group: Pointer to the group to add the event to
+  * @timestamp: Timestamp that the event will expire on
+  * @func: Callback function for the event
+  * @priv: Private data to send to the callback function
++ * @prio: Priority of the worker that will run the callback
+  */
+-int kgsl_add_event(struct kgsl_device *device, struct kgsl_event_group *group,
+-		unsigned int timestamp, kgsl_event_func func, void *priv)
++static int kgsl_add_event_common(struct kgsl_device *device,
++		struct kgsl_event_group *group, unsigned int timestamp,
++		kgsl_event_func func, void *priv, enum kgsl_priority prio)
+ {
+ 	unsigned int queued;
+ 	struct kgsl_context *context = group->context;
+@@ -271,10 +288,12 @@ int kgsl_add_event(struct kgsl_device *device, struct kgsl_event_group *group,
+ 	event->func = func;
+ 	event->created = jiffies;
+ 	event->group = group;
++	event->prio = prio;
+ 
+ 	kthread_init_work(&event->work, _kgsl_event_worker);
+ 
+-	trace_kgsl_register_event(KGSL_CONTEXT_ID(context), timestamp, func);
++	trace_kgsl_register_event(KGSL_CONTEXT_ID(context), timestamp, func,
++		prio);
+ 
+ 	spin_lock(&group->lock);
+ 
+@@ -287,7 +306,9 @@ int kgsl_add_event(struct kgsl_device *device, struct kgsl_event_group *group,
+ 
+ 	if (timestamp_cmp(retired, timestamp) >= 0) {
+ 		event->result = KGSL_EVENT_RETIRED;
+-		kthread_queue_work(&kgsl_driver.RT_worker, &event->work);
++		kthread_queue_work((prio == KGSL_EVENT_LOW_PRIORITY) ?
++			&kgsl_driver.low_prio_worker : &kgsl_driver.RT_worker,
++			&event->work);
+ 		spin_unlock(&group->lock);
+ 		return 0;
+ 	}
+@@ -300,6 +321,42 @@ int kgsl_add_event(struct kgsl_device *device, struct kgsl_event_group *group,
+ 	return 0;
+ }
+ 
++/**
++ * kgsl_add_event() - Add a new GPU event to a group
++ * @device: Pointer to a KGSL device
++ * @group: Pointer to the group to add the event to
++ * @timestamp: Timestamp that the event will expire on
++ * @func: Callback function for the event
++ * @priv: Private data to send to the callback function
++ */
++int kgsl_add_event(struct kgsl_device *device, struct kgsl_event_group *group,
++		unsigned int timestamp, kgsl_event_func func, void *priv)
++{
++	return kgsl_add_event_common(device, group, timestamp, func, priv,
++		KGSL_EVENT_REGULAR_PRIORITY);
++}
++EXPORT_SYMBOL(kgsl_add_event);
++
++/**
++ * kgsl_add_low_prio_event() - Add a new low priority GPU event to a group
++ * @device: Pointer to a KGSL device
++ * @group: Pointer to the group to add the event to
++ * @timestamp: Timestamp that the event will expire on
++ * @func: Callback function for the event
++ * @priv: Private data to send to the callback function
++ *
++ * The callback is dispatched on the low priority worker to keep expensive
++ * event processing (e.g. memory frees) off the RT worker.
++ */
++int kgsl_add_low_prio_event(
++		struct kgsl_device *device, struct kgsl_event_group *group,
++		unsigned int timestamp, kgsl_event_func func, void *priv)
++{
++	return kgsl_add_event_common(device, group, timestamp, func, priv,
++		KGSL_EVENT_LOW_PRIORITY);
++}
++EXPORT_SYMBOL(kgsl_add_low_prio_event);
++
+ void kgsl_process_event_groups(struct kgsl_device *device)
+ {
+ 	struct kgsl_event_group *group;
+@@ -367,11 +424,11 @@ static void events_debugfs_print_group(struct seq_file *s,
+ 		group->readtimestamp(event->device, group->priv,
+ 			KGSL_TIMESTAMP_RETIRED, &retired);
+ 
+-		seq_printf(s, "\t%u:%u age=%lu func=%ps [retired=%u]\n",
++		seq_printf(s, "\t%u:%u age=%lu func=%ps [retired=%u] prio=%s\n",
+ 			group->context ? group->context->id :
+ 						KGSL_MEMSTORE_GLOBAL,
+ 			event->timestamp, jiffies  - event->created,
+-			event->func, retired);
++			event->func, retired, prio_to_string(event->prio));
+ 	}
+ 	spin_unlock(&group->lock);
+ }
+diff --git a/drivers/gpu/msm/kgsl_trace.h b/drivers/gpu/msm/kgsl_trace.h
+index 8a1e0f5014ec..b9ef2bfa3d6b 100644
+--- a/drivers/gpu/msm/kgsl_trace.h
++++ b/drivers/gpu/msm/kgsl_trace.h
+@@ -983,33 +983,39 @@ TRACE_EVENT(kgsl_regwrite,
+ );
+ 
+ TRACE_EVENT(kgsl_register_event,
+-		TP_PROTO(unsigned int id, unsigned int timestamp, void *func),
+-		TP_ARGS(id, timestamp, func),
++		TP_PROTO(unsigned int id, unsigned int timestamp, void *func,
++			enum kgsl_priority prio),
++		TP_ARGS(id, timestamp, func, prio),
+ 		TP_STRUCT__entry(
+ 			__field(unsigned int, id)
+ 			__field(unsigned int, timestamp)
+ 			__field(void *, func)
++			__field(enum kgsl_priority, prio)
+ 		),
+ 		TP_fast_assign(
+ 			__entry->id = id;
+ 			__entry->timestamp = timestamp;
+ 			__entry->func = func;
++			__entry->prio = prio;
+ 		),
+ 		TP_printk(
+-			"ctx=%u ts=%u cb=%pS",
+-			__entry->id, __entry->timestamp, __entry->func)
++			"ctx=%u ts=%u cb=%pS prio=%s",
++			__entry->id, __entry->timestamp, __entry->func,
++			prio_to_string(__entry->prio))
+ );
+ 
+ TRACE_EVENT(kgsl_fire_event,
+ 		TP_PROTO(unsigned int id, unsigned int ts,
+-			unsigned int type, unsigned int age, void *func),
+-		TP_ARGS(id, ts, type, age, func),
++			unsigned int type, unsigned int age, void *func,
++			enum kgsl_priority prio),
++		TP_ARGS(id, ts, type, age, func, prio),
+ 		TP_STRUCT__entry(
+ 			__field(unsigned int, id)
+ 			__field(unsigned int, ts)
+ 			__field(unsigned int, type)
+ 			__field(unsigned int, age)
+ 			__field(void *, func)
++			__field(enum kgsl_priority, prio)
+ 		),
+ 		TP_fast_assign(
+ 			__entry->id = id;
+@@ -1017,14 +1023,16 @@ TRACE_EVENT(kgsl_fire_event,
+ 			__entry->type = type;
+ 			__entry->age = age;
+ 			__entry->func = func;
++			__entry->prio = prio;
+ 		),
+ 		TP_printk(
+-			"ctx=%u ts=%u type=%s age=%u cb=%pS",
++			"ctx=%u ts=%u type=%s age=%u cb=%pS prio=%s",
+ 			__entry->id, __entry->ts,
+ 			__print_symbolic(__entry->type,
+ 				{ KGSL_EVENT_RETIRED, "retired" },
+ 				{ KGSL_EVENT_CANCELLED, "cancelled" }),
+-			__entry->age, __entry->func)
++			__entry->age, __entry->func,
++			prio_to_string(__entry->prio))
+ );
+ 
+ TRACE_EVENT(kgsl_active_count,
