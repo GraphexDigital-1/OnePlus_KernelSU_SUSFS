@@ -1,0 +1,90 @@
+# 0010 - f2fs: GC improvements subset (GKI-safe)
+#
+# Source: Kirisakura OP7 (4.14, freak07/Park Ju Hyung) commits:
+#   a91275159575  f2fs: set ioprio of GC kthread to idle
+#   5f894fbfae76  f2fs: don't wait with each discards under gc_urgent
+#   3cbd2a1ad9f2  f2fs: reduce timeout for uncongestion on f2fs_write_cache_pages()
+#   ec85db3256c9  f2fs: use a more reasonable discard policy for high utilization
+#
+# 5.10 adaptations:
+#   - gc.c: ioprio set in the else branch (avoid NULL deref on error path) + <linux/ioprio.h>
+#   - segment.c: GC_URGENT -> (GC_URGENT_HIGH || GC_URGENT_MID || GC_URGENT_LOW)
+#   - f2fs.h + segment.c: DEF_MAX_DISCARD_URGENT_ISSUE_TIME (10 s), re-anchored to 5.10
+#
+# Validated: patch -p1 --fuzz=0 + git apply --check on GKI common and OP10P trees (5.10.209);
+# compile test of fs/f2fs/ clean (clang r416183c, CI KCFLAGS). GKI-safe subset of the
+# full rapid GC series (screen-state trigger and the rest of the 4.14 framework excluded).
+
+diff -Naur a/fs/f2fs/data.c b/fs/f2fs/data.c
+--- a/fs/f2fs/data.c	2026-11-15 17:17:50.084027941 +0000
++++ b/fs/f2fs/data.c	2026-11-15 22:36:29.549766555 +0000
+@@ -3127,8 +3127,11 @@
+ 					ret = 0;
+ 					if (wbc->sync_mode == WB_SYNC_ALL) {
+ 						cond_resched();
+-						congestion_wait(BLK_RW_ASYNC,
+-							DEFAULT_IO_TIMEOUT);
++#if (CONFIG_HZ > 100)
++						congestion_wait(BLK_RW_ASYNC, 2);
++#else
++						congestion_wait(BLK_RW_ASYNC, 1);
++#endif
+ 						goto retry_write;
+ 					}
+ 					goto next;
+diff -Naur a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+--- a/fs/f2fs/f2fs.h	2026-11-15 17:17:50.085027909 +0000
++++ b/fs/f2fs/f2fs.h	2026-11-15 22:36:29.596765223 +0000
+@@ -222,6 +222,7 @@
+ #define DEF_MID_DISCARD_ISSUE_TIME	500	/* 500 ms, if device busy */
+ #define DEF_MAX_DISCARD_ISSUE_TIME	60000	/* 60 s, if no candidates */
+ #define DEF_DISCARD_URGENT_UTIL		80	/* do more discard over 80% */
++#define DEF_MAX_DISCARD_URGENT_ISSUE_TIME	10000	/* 10 s, if no candidates on high utilization */
+ #define DEF_CP_INTERVAL			60	/* 60 secs */
+ #define DEF_IDLE_INTERVAL		5	/* 5 secs */
+ #define DEF_DISABLE_INTERVAL		5	/* 5 secs */
+diff -Naur a/fs/f2fs/gc.c b/fs/f2fs/gc.c
+--- a/fs/f2fs/gc.c	2026-11-15 17:17:50.086027878 +0000
++++ b/fs/f2fs/gc.c	2026-11-15 22:37:27.703119080 +0000
+@@ -14,6 +14,7 @@
+ #include <linux/kthread.h>
+ #include <linux/delay.h>
+ #include <linux/freezer.h>
++#include <linux/ioprio.h>
+ #include <linux/sched/signal.h>
+ 
+ #include "f2fs.h"
+@@ -174,6 +175,9 @@
+ 		err = PTR_ERR(gc_th->f2fs_gc_task);
+ 		kfree(gc_th);
+ 		sbi->gc_thread = NULL;
++	} else {
++		set_task_ioprio(gc_th->f2fs_gc_task,
++				IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0));
+ 	}
+ out:
+ 	return err;
+diff -Naur a/fs/f2fs/segment.c b/fs/f2fs/segment.c
+--- a/fs/f2fs/segment.c	2026-11-15 17:17:50.088027815 +0000
++++ b/fs/f2fs/segment.c	2026-11-15 22:37:27.704119052 +0000
+@@ -1153,7 +1153,7 @@
+ 			dpolicy->granularity = 1;
+ 			if (atomic_read(&dcc->discard_cmd_cnt))
+ 				dpolicy->max_interval =
+-					DEF_MIN_DISCARD_ISSUE_TIME;
++					DEF_MAX_DISCARD_URGENT_ISSUE_TIME;
+ 		}
+ 	} else if (discard_type == DPOLICY_FORCE) {
+ 		dpolicy->min_interval = DEF_MIN_DISCARD_ISSUE_TIME;
+@@ -1782,7 +1782,10 @@
+ 		wait_event_interruptible_timeout(*q,
+ 				kthread_should_stop() || freezing(current) ||
+ 				dcc->discard_wake,
+-				msecs_to_jiffies(wait_ms));
++				msecs_to_jiffies((sbi->gc_mode == GC_URGENT_HIGH ||
++						  sbi->gc_mode == GC_URGENT_MID ||
++						  sbi->gc_mode == GC_URGENT_LOW) ?
++						 1 : wait_ms));
+ 
+ 		if (dcc->discard_wake)
+ 			dcc->discard_wake = 0;
