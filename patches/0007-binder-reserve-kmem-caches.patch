@@ -85,8 +85,6 @@ index 486b9024c6c4..523db110a827 100755
 -	kfree(ref);
 +	kmem_cache_free(binder_ref_pool, ref);
  }
- 
- /**
 @@ -1518,7 +1528,7 @@ static int binder_inc_ref_for_node(struct binder_proc *proc,
  	ref = binder_get_ref_for_node_olocked(proc, node, NULL);
  	if (!ref) {
