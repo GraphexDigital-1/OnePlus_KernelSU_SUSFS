@@ -254,15 +254,11 @@ index 486b9024c6c4..523db110a827 100755
  }
  
  static int binder_thread_release(struct binder_proc *proc,
-@@ -6004,7 +6018,7 @@ static int binder_open(struct inode *nodp, struct file *filp)
- 	binder_debug(BINDER_DEBUG_OPEN_CLOSE, "%s: %d:%d\n", __func__,
+@@ -5699,3 +5699,3 @@
  		     current->group_leader->pid, current->pid);
  
 -	eproc = kzalloc(sizeof(*eproc), GFP_KERNEL);
 +	eproc = kmem_cache_zalloc(binder_proc_pool, GFP_KERNEL);
- 	if (eproc == NULL)
- 		return -ENOMEM;
- 	proc = &eproc->proc;
 @@ -6957,6 +6971,73 @@ static int __init init_binder_device(const char *name)
  	return ret;
  }
