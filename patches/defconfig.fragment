@@ -18,4 +18,5 @@ CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
 # CONFIG_INIT_STACK_ALL_ZERO is not set
 CONFIG_INIT_STACK_NONE=y
 # CONFIG_UBSAN is not set
-# CONFIG_DEBUG_LIST is not set
+# CONFIG_DEBUG_LIST no aplicado: lo fuerza BUG_ON_DATA_CORRUPTION
+# (hardening del stock) - desactivarlo exigiria quitar tambien ese BUG_ON.
