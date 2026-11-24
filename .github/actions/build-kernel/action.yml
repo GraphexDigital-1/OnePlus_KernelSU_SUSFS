@@ -1325,7 +1325,14 @@ runs:
         fi
 
         echo "Patching module intercept and overlay mechanism"
-        patch -p1 < "$KERNEL_PATCHES_FOLDER/oneplus/module_overlay/0001-module-Add-module-intercept-and-overlay-mechanism-$ANDROID_VER-$KERNEL_VER.patch"
+        # -F 3 because the kernel/Makefile hunk appends "obj-y +=
+        # module_overlay/" right after "clean-files", which is the end of the
+        # file in android_kernel_common_oneplus_sm8450. This tree is
+        # android_kernel_oneplus_sm8450, which keeps OPlus obj-$(CONFIG_...)
+        # lines after that point, so the hunk needs fuzz to match.
+        patch -p1 -F 3 < "$KERNEL_PATCHES_FOLDER/oneplus/module_overlay/0001-module-Add-module-intercept-and-overlay-mechanism-$ANDROID_VER-$KERNEL_VER.patch"
+        grep -q 'obj-y += module_overlay/' kernel/Makefile \
+          || { echo "::error::module_overlay not wired into kernel/Makefile"; exit 1; }
         if [ -d "$COMMON_KERNEL_FOLDER/kernel/module/module_overlay/" ]; then
           chmod +x ./kernel/module/module_overlay/convert_overlay.sh
         elif [ -d "$COMMON_KERNEL_FOLDER/kernel/module_overlay/" ]; then
