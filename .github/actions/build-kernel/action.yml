@@ -1541,6 +1541,14 @@ runs:
           exit 1
         fi
         
+        # Repo-local override: our kernel fork (5.10.269) needs a re-based
+        # compat patch; upstream's is cut against 5.10.209.
+        LOCAL_NTSYNC="$GITHUB_WORKSPACE/patches/ntsync/$(basename "$NTSYNC_PATCH")"
+        if [ -f "$LOCAL_NTSYNC" ]; then
+          echo "Using repo-local NTSync compat patch override"
+          NTSYNC_PATCH="$LOCAL_NTSYNC"
+        fi
+        
         echo "Using patch: $(basename $NTSYNC_PATCH)"
         if [ "$ANDROID_VER" = "android16" ] && [ "$KERNEL_VER" = "6.12" ]; then
           echo "Removing pre-existing ntsync files for android16-6.12"
