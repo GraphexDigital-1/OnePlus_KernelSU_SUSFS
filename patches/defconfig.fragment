@@ -34,3 +34,20 @@ CONFIG_INIT_STACK_ALL_ZERO=y
 # modules. Stock sets this =m (oplus_sensor.ko) and we keep using the stock
 # vendor modules, so the in-tree copy is both broken and redundant.
 # CONFIG_OPLUS_FEATURE_SENSOR_CFG is not set
+
+# Parity with the known-good 5.10.209 A14 build (batch 2026-11-27). The new base
+# repo (android_kernel_oneplus_sm8450, OPlus V/A15 generation) carries in-tree
+# Kconfig symbols that the A14 OPlus common kernel did not have at all. They are
+# "default y", so olddefconfig turned them on and they changed built-in kernel
+# behaviour under the untouched OOS14 vendor stack. The 5.10.269 image hung at
+# the 1+ logo with no USB gadget. Full KMI now matches the 209 build (0 CRC
+# differences over 7062 symbols, 374/374 vendor_dlkm modules clean), so what is
+# left is behaviour, not ABI. UFSFEATURE is the prime suspect: it injects Samsung
+# UFS Turbo Write / Host Initiated Defrag code into the built-in ufshcd core on a
+# device whose stock kernel never ran it, and UFSTW_BOOT_ENABLED arms it at boot.
+# CONFIG_UFSFEATURE is not set
+# CONFIG_OPLUS_SYSTEM_KERNEL is not set
+# CONFIG_OPLUS_SYSTEM_KERNEL_QCOM is not set
+# CONFIG_OPLUS_FEATURE_PERFORMANCE_MM is not set
+# CONFIG_OPLUS_FEATURE_PERFORMANCE_SCHED is not set
+# CONFIG_DYNAMIC_TUNING_SWAPPINESS is not set
